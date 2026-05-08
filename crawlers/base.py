@@ -155,7 +155,6 @@ class BaseCrawler:
             message = result.get("message", "访问太过频繁")
             print(f"⚠️  限流警告: {message}")
             self.rate_limit_sleep = min(self.rate_limit_sleep * 2, self.max_backoff)
-
         elif code == "0000" or code == 0:
             self.rate_limit_sleep = max(self.rate_limit_sleep * 0.9, 3)
 

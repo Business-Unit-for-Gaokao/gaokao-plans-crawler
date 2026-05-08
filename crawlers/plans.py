@@ -1,10 +1,8 @@
-# crawlers/plans.py
 import itertools
 import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from .base import BaseCrawler
 
@@ -19,6 +17,7 @@ class PlanCrawler(BaseCrawler):
 
         self.run_deadline_seconds = int(os.getenv('PLAN_RUN_DEADLINE_SECONDS', '17400'))
         self.flush_schools = max(1, int(os.getenv('PLAN_FLUSH_SCHOOLS', '25')))
+        self.flush_combos = max(1, int(os.getenv('PLAN_FLUSH_COMBOS', '10')))
 
         self.use_browser = os.getenv('PLAN_USE_BROWSER', '1') == '1'
         self.use_static_fallback = os.getenv('PLAN_USE_STATIC_FALLBACK', '1') == '1'
@@ -26,7 +25,6 @@ class PlanCrawler(BaseCrawler):
         self.browser_slow_mo = int(os.getenv('PLAN_BROWSER_SLOW_MO', '0') or 0)
         self.page_timeout_ms = int(os.getenv('PLAN_PAGE_TIMEOUT_MS', '20000'))
         self.max_combos = int(os.getenv('PLAN_MAX_COMBOS', '0') or 0)
-        self.flush_combos = max(1, int(os.getenv('PLAN_FLUSH_COMBOS', '10')))
         self.page_size_hint = max(1, int(os.getenv('PLAN_PAGE_SIZE_HINT', '10')))
         self.wait_after_click_ms = int(os.getenv('PLAN_WAIT_AFTER_CLICK_MS', '900'))
         self.wait_after_nav_ms = int(os.getenv('PLAN_WAIT_AFTER_NAV_MS', '1800'))
@@ -41,17 +39,6 @@ class PlanCrawler(BaseCrawler):
             '61': '陕西', '62': '甘肃', '63': '青海', '64': '宁夏', '65': '新疆',
             '71': '台湾', '81': '香港', '82': '澳门',
         }
-
-        self.filter_specs = [
-            {'key': 'batch', 'labels': ['批次']},
-            {'key': 'type', 'labels': ['科类', '类型', '招生类型']},
-            {'key': 'major_group', 'labels': ['专业组', '分组', '组别']},
-            {'key': 'subject_requirements', 'labels': ['选科', '科目要求']},
-        ]
-
-    # ----------------------------
-    # basic utils
-    # ----------------------------
 
     def now_str(self):
         return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
@@ -205,6 +192,7 @@ class PlanCrawler(BaseCrawler):
             str(item.get('type') or ''),
             str(item.get('major') or ''),
             str(item.get('major_code') or ''),
+            str(item.get('major_group') or ''),
             str(item.get('major_group_code') or ''),
             str(item.get('plan_number') or ''),
             str(item.get('years') or ''),
@@ -252,10 +240,6 @@ class PlanCrawler(BaseCrawler):
 
     def should_stop(self, started_at):
         return (time.time() - started_at) >= self.run_deadline_seconds
-
-    # ----------------------------
-    # old static api fallback
-    # ----------------------------
 
     def get_plan_data_static(self, school_id, year, province_id):
         url = f'https://static-data.gaokao.cn/www/2.0/schoolspecialplan/{school_id}/{year}/{province_id}.json'
@@ -309,10 +293,6 @@ class PlanCrawler(BaseCrawler):
                 })
         return records
 
-    # ----------------------------
-    # merge / normalize
-    # ----------------------------
-
     def merge_records(self, province_payload, new_records):
         added = 0
         for item in new_records:
@@ -329,87 +309,11 @@ class PlanCrawler(BaseCrawler):
             return ''
         return ' '.join(str(value).replace('\u3000', ' ').split()).strip()
 
-    def _header_value(self, row_map, *keys):
-        for key in keys:
-            for k, v in row_map.items():
-                if key in k:
-                    return v
-        return None
-
-    def normalize_table_rows(self, school_id, year, province_id, province_name, headers, rows, source_filter):
-        result = []
-        norm_headers = [self._clean_text(h).replace('（', '(').replace('）', ')') for h in headers]
-
-        for row in rows:
-            cells = [self._clean_text(x) for x in row]
-            if not any(cells):
-                continue
-
-            row_map = {}
-            for idx, header in enumerate(norm_headers):
-                row_map[header] = cells[idx] if idx < len(cells) else ''
-
-            major = (
-                self._header_value(row_map, '专业名称')
-                or self._header_value(row_map, '专业')
-                or self._header_value(row_map, '招生专业')
-            )
-            major_code = self._header_value(row_map, '专业代码', '代码')
-            batch = self._header_value(row_map, '批次') or source_filter.get('batch')
-            type_name = (
-                self._header_value(row_map, '科类')
-                or self._header_value(row_map, '类型')
-                or self._header_value(row_map, '招生类型')
-                or source_filter.get('type')
-            )
-            major_group = self._header_value(row_map, '专业组') or source_filter.get('major_group')
-            plan_number = self._header_value(row_map, '招生计划', '计划数', '计划')
-            years_value = self._header_value(row_map, '学制', '修业年限')
-            tuition = self._header_value(row_map, '学费', '收费标准')
-            note = self._header_value(row_map, '备注', '说明', '要求')
-            subject_requirements = self._header_value(row_map, '选科', '科目要求') or source_filter.get('subject_requirements')
-
-            if not major and not plan_number:
-                continue
-
-            result.append({
-                'school_id': str(school_id),
-                'year': str(year),
-                'province_id': str(province_id),
-                'province': province_name,
-                'plan_type': 'browser',
-                'batch': batch,
-                'type': type_name,
-                'major': major,
-                'major_code': major_code,
-                'major_group': major_group,
-                'major_group_code': self._header_value(row_map, '专业组代码', '组代码'),
-                'major_group_info': self._header_value(row_map, '专业组备注', '组备注'),
-                'level1_name': None,
-                'level2_name': None,
-                'level3_name': None,
-                'plan_number': plan_number,
-                'years': years_value,
-                'tuition': tuition,
-                'note': note,
-                'subject_requirements': subject_requirements,
-                'source': 'browser',
-                'source_filter': dict(source_filter or {}),
-                'raw_row': row_map,
-            })
-        return result
-
-    # ----------------------------
-    # playwright helpers
-    # ----------------------------
-
     def _start_playwright_browser(self):
         try:
             from playwright.sync_api import sync_playwright
         except Exception as e:
-            raise RuntimeError(
-                '未安装 Playwright。请先执行: pip install playwright && playwright install chromium'
-            ) from e
+            raise RuntimeError('未安装 Playwright。请先执行: pip install playwright && playwright install chromium') from e
 
         p = sync_playwright().start()
         browser = p.chromium.launch(headless=self.browser_headless, slow_mo=self.browser_slow_mo)
@@ -428,7 +332,7 @@ class PlanCrawler(BaseCrawler):
                 clicked = page.evaluate(
                     """
                     (targetText) => {
-                      const norm = s => (s || '').replace(/\\s+/g, '').trim();
+                      const norm = s => (s || '').replace(/\s+/g, '').trim();
                       const visible = el => {
                         if (!el) return false;
                         const rect = el.getBoundingClientRect();
@@ -457,215 +361,326 @@ class PlanCrawler(BaseCrawler):
         self._page_wait(page, self.wait_after_nav_ms)
         self.dismiss_page_noise(page)
 
-        self.try_click_text(page, '招生计划')
-        self._page_wait(page, 800)
+        page.wait_for_selector('div.bgwhite table.tb-normal, div.bgwhite .ant-select-selection', timeout=self.page_timeout_ms)
 
-        self.try_click_text(page, str(year))
-        self._page_wait(page, 800)
+        found = page.evaluate(
+            """
+            () => {
+              const blocks = [...document.querySelectorAll('div.bgwhite')];
+              return blocks.some(b => (b.innerText || '').includes('招生计划'));
+            }
+            """
+        )
+        if not found:
+            raise RuntimeError('未找到招生计划区块')
 
-        self.try_click_text(page, province_name)
-        self._page_wait(page, 1000)
+        self.select_plan_filter_by_index(page, 0, province_name)
+        self.select_plan_filter_by_index(page, 1, str(year))
 
-        self.dismiss_page_noise(page)
+        self._page_wait(page, 1200)
         self.wait_table_ready(page)
 
     def wait_table_ready(self, page):
-        candidates = [
-            'table',
-            '[role="table"]',
-            'tbody tr',
-            '.ant-table',
-            '.el-table',
-        ]
-        for sel in candidates:
-            try:
-                page.wait_for_selector(sel, timeout=4000)
-                return
-            except Exception:
-                continue
-        self._page_wait(page, 1500)
+        page.wait_for_selector('table.tb-normal tbody tr', timeout=self.page_timeout_ms)
+        self._page_wait(page, 500)
 
-    def try_click_text(self, page, text, scope_labels=None):
-        text = self._clean_text(text)
-        if not text:
+    def select_plan_filter_by_index(self, page, select_index, visible_text):
+        visible_text = self._clean_text(visible_text)
+        if not visible_text:
             return False
 
-        labels = scope_labels or []
-        try:
-            clicked = page.evaluate(
-                """
-                ({targetText, labels}) => {
-                  const norm = s => (s || '').replace(/\\s+/g, '').trim();
-                  const visible = el => {
-                    if (!el) return false;
-                    const rect = el.getBoundingClientRect();
-                    const st = window.getComputedStyle(el);
-                    return rect.width > 0 && rect.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
-                  };
-                  const isClickable = el => {
-                    if (!el) return false;
-                    const tag = (el.tagName || '').toLowerCase();
-                    const st = window.getComputedStyle(el);
-                    return ['button', 'a', 'label', 'summary'].includes(tag)
-                      || el.getAttribute('role') === 'button'
-                      || st.cursor === 'pointer'
-                      || typeof el.onclick === 'function'
-                      || /btn|button|tab|item|option|radio|check|tag|chip/i.test(el.className || '');
-                  };
-                  const labelSet = (labels || []).map(norm).filter(Boolean);
-                  const nodes = [...document.querySelectorAll('button,[role="button"],a,label,li,span,div')].filter(visible);
-                  const exact = el => norm(el.innerText || el.textContent) === norm(targetText);
+        clicked = page.evaluate(
+            """
+            ({selectIndex}) => {
+              const root = [...document.querySelectorAll('div.bgwhite')]
+                .find(b => (b.innerText || '').includes('招生计划'));
+              if (!root) return false;
 
-                  const findInsideContainer = () => {
-                    if (!labelSet.length) return null;
-                    const labelNodes = [...document.querySelectorAll('body *')].filter(el => {
-                      if (!visible(el)) return false;
-                      const t = norm(el.innerText || el.textContent);
-                      return labelSet.includes(t) && el.children.length === 0;
-                    });
-                    for (const labelNode of labelNodes) {
-                      let container = labelNode.parentElement;
-                      for (let i = 0; i < 5 && container; i++, container = container.parentElement) {
-                        const hit = [...container.querySelectorAll('button,[role="button"],a,label,li,span,div')]
-                          .find(el => visible(el) && isClickable(el) && exact(el));
-                        if (hit) return hit;
-                      }
-                    }
-                    return null;
-                  };
+              const sels = [...root.querySelectorAll('.ant-select-selection[role="combobox"]')];
+              const target = sels[selectIndex];
+              if (!target) return false;
 
-                  let hit = findInsideContainer();
-                  if (!hit) {
-                    hit = nodes.find(el => isClickable(el) && exact(el));
-                  }
-                  if (!hit) {
-                    hit = nodes.find(el => exact(el));
-                  }
-                  if (!hit) return false;
+              target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+              target.click();
+              return true;
+            }
+            """,
+            {'selectIndex': int(select_index)},
+        )
+        if not clicked:
+            return False
 
+        self._page_wait(page, 500)
+
+        picked = page.evaluate(
+            """
+            ({visibleText}) => {
+              const norm = s => (s || '').replace(/\s+/g, '').trim();
+              const visible = el => {
+                if (!el) return false;
+                const rect = el.getBoundingClientRect();
+                const st = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+              };
+
+              const dropdowns = [...document.querySelectorAll('.ant-select-dropdown')]
+                .filter(visible);
+
+              for (const dd of dropdowns) {
+                const options = [...dd.querySelectorAll('.ant-select-dropdown-menu-item, .ant-select-item-option, li')];
+                const hit = options.find(el => norm(el.innerText || el.textContent) === norm(visibleText));
+                if (hit) {
+                  hit.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
                   hit.click();
                   return true;
                 }
-                """,
-                {'targetText': text, 'labels': labels},
-            )
-            if clicked:
-                self._page_wait(page)
-                return True
-        except Exception:
-            pass
+              }
+              return false;
+            }
+            """,
+            {'visibleText': visible_text},
+        )
+
+        if picked:
+            self._page_wait(page, 1200)
+            self.wait_table_ready(page)
+            return True
 
         try:
-            page.get_by_text(text, exact=True).first.click(timeout=1200)
-            self._page_wait(page)
+            page.get_by_text(visible_text, exact=True).last.click(timeout=1500)
+            self._page_wait(page, 1200)
+            self.wait_table_ready(page)
             return True
         except Exception:
             return False
 
-    def collect_filter_options(self, page, labels):
-        try:
-            options = page.evaluate(
-                """
-                (labels) => {
-                  const norm = s => (s || '').replace(/\\s+/g, '').trim();
-                  const visible = el => {
-                    if (!el) return false;
-                    const rect = el.getBoundingClientRect();
-                    const st = window.getComputedStyle(el);
-                    return rect.width > 0 && rect.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
-                  };
-                  const isOption = el => {
-                    if (!visible(el)) return false;
-                    const tag = (el.tagName || '').toLowerCase();
-                    const t = norm(el.innerText || el.textContent);
-                    if (!t || t.length > 20) return false;
-                    if (/^(展开|收起|重置|确定|搜索|清空|上一页|下一页|尾页|首页|共\\d+页|跳至|GO)$/i.test(t)) return false;
-                    const st = window.getComputedStyle(el);
-                    return ['button', 'a', 'label', 'li', 'span', 'div'].includes(tag)
-                      && (
-                        ['button', 'a', 'label'].includes(tag)
-                        || el.getAttribute('role') === 'button'
-                        || st.cursor === 'pointer'
-                        || /btn|button|tab|item|option|radio|check|tag|chip/i.test(el.className || '')
-                      );
-                  };
+    def get_current_filter_texts(self, page):
+        data = page.evaluate(
+            """
+            () => {
+              const root = [...document.querySelectorAll('div.bgwhite')]
+                .find(b => (b.innerText || '').includes('招生计划'));
+              if (!root) return {};
 
-                  const labelSet = (labels || []).map(norm).filter(Boolean);
-                  const labelNodes = [...document.querySelectorAll('body *')].filter(el => {
-                    if (!visible(el)) return false;
-                    const t = norm(el.innerText || el.textContent);
-                    return labelSet.includes(t) && el.children.length === 0;
-                  });
+              const sels = [...root.querySelectorAll('.ant-select-selection-selected-value')];
+              const read = i => sels[i] ? (sels[i].innerText || sels[i].textContent || '').trim() : '';
 
-                  const pickFromContainer = (container) => {
-                    const arr = [];
-                    const seen = new Set();
-                    for (const el of container.querySelectorAll('button,[role="button"],a,label,li,span,div')) {
-                      if (!isOption(el)) continue;
-                      const t = norm(el.innerText || el.textContent);
-                      if (!t || labelSet.includes(t)) continue;
-                      if (seen.has(t)) continue;
-                      seen.add(t);
-                      arr.push(t);
-                    }
-                    return arr;
-                  };
+              return {
+                province: read(0),
+                year: read(1),
+                type: read(2),
+                batch: read(3),
+              };
+            }
+            """
+        )
+        return data if isinstance(data, dict) else {}
 
-                  for (const labelNode of labelNodes) {
-                    let container = labelNode.parentElement;
-                    for (let i = 0; i < 5 && container; i++, container = container.parentElement) {
-                      const opts = pickFromContainer(container);
-                      if (opts.length >= 2 && opts.length <= 40) {
-                        return opts;
-                      }
-                    }
-                  }
-                  return [];
-                }
-                """,
-                labels,
-            )
-            if not isinstance(options, list):
-                return []
-            cleaned = []
-            seen = set()
-            for x in options:
-                v = self._clean_text(x)
-                if not v:
-                    continue
-                if v in seen:
-                    continue
-                seen.add(v)
-                cleaned.append(v)
-            return cleaned
-        except Exception:
+    def collect_dropdown_options_by_index(self, page, select_index):
+        opened = page.evaluate(
+            """
+            ({selectIndex}) => {
+              const root = [...document.querySelectorAll('div.bgwhite')]
+                .find(b => (b.innerText || '').includes('招生计划'));
+              if (!root) return false;
+
+              const sels = [...root.querySelectorAll('.ant-select-selection[role="combobox"]')];
+              const target = sels[selectIndex];
+              if (!target) return false;
+
+              target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+              target.click();
+              return true;
+            }
+            """,
+            {'selectIndex': int(select_index)},
+        )
+        if not opened:
             return []
 
+        self._page_wait(page, 500)
+
+        options = page.evaluate(
+            """
+            () => {
+              const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+              const visible = el => {
+                if (!el) return false;
+                const rect = el.getBoundingClientRect();
+                const st = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+              };
+
+              const dropdown = [...document.querySelectorAll('.ant-select-dropdown')].find(visible);
+              if (!dropdown) return [];
+
+              const nodes = [...dropdown.querySelectorAll('.ant-select-dropdown-menu-item, .ant-select-item-option, li')];
+              const out = [];
+              const seen = new Set();
+
+              for (const el of nodes) {
+                const t = norm(el.innerText || el.textContent);
+                if (!t) continue;
+                if (seen.has(t)) continue;
+                seen.add(t);
+                out.push(t);
+              }
+              return out;
+            }
+            """
+        )
+
+        try:
+            page.locator('body').click(position={'x': 10, 'y': 10})
+            self._page_wait(page, 300)
+        except Exception:
+            pass
+
+        cleaned = []
+        seen = set()
+        for x in options or []:
+            v = self._clean_text(x)
+            if not v:
+                continue
+            if v in seen:
+                continue
+            seen.add(v)
+            cleaned.append(v)
+        return cleaned
+
+    def collect_major_groups(self, page):
+        groups = page.evaluate(
+            """
+            () => {
+              const root = [...document.querySelectorAll('div.bgwhite')]
+                .find(b => (b.innerText || '').includes('招生计划'));
+              if (!root) return [];
+
+              const wrap = root.querySelector('.score-plan_groupList__1eMnJ');
+              if (!wrap) return [];
+
+              return [...wrap.querySelectorAll('.score-plan_item__1mtQ4')]
+                .map(el => (el.innerText || el.textContent || '').trim())
+                .filter(Boolean);
+            }
+            """
+        )
+        cleaned = []
+        seen = set()
+        for x in groups or []:
+            v = self._clean_text(x)
+            if not v or v in seen:
+                continue
+            seen.add(v)
+            cleaned.append(v)
+        return cleaned
+
+    def expand_major_groups_if_needed(self, page):
+        try:
+            expanded = page.evaluate(
+                """
+                () => {
+                  const root = [...document.querySelectorAll('div.bgwhite')]
+                    .find(b => (b.innerText || '').includes('招生计划'));
+                  if (!root) return false;
+
+                  const btn = root.querySelector('.score-plan_showMore__cYw23');
+                  if (!btn) return false;
+
+                  const t = (btn.innerText || '').trim();
+                  if (t.includes('展开')) {
+                    btn.click();
+                    return true;
+                  }
+                  return false;
+                }
+                """
+            )
+            if expanded:
+                self._page_wait(page, 800)
+        except Exception:
+            pass
+
+    def click_major_group(self, page, text):
+        text = self._clean_text(text)
+        if not text:
+            return False
+
+        self.expand_major_groups_if_needed(page)
+
+        clicked = page.evaluate(
+            """
+            ({targetText}) => {
+              const norm = s => (s || '').replace(/\s+/g, '').trim();
+              const root = [...document.querySelectorAll('div.bgwhite')]
+                .find(b => (b.innerText || '').includes('招生计划'));
+              if (!root) return false;
+
+              const nodes = [...root.querySelectorAll('.score-plan_item__1mtQ4')];
+              const hit = nodes.find(el => norm(el.innerText || el.textContent) === norm(targetText));
+              if (!hit) return false;
+
+              hit.click();
+              return true;
+            }
+            """,
+            {'targetText': text},
+        )
+        if clicked:
+            self._page_wait(page, 1200)
+            self.wait_table_ready(page)
+            return True
+        return False
+
     def collect_filter_dimensions(self, page):
-        dims = []
-        for spec in self.filter_specs:
-            opts = self.collect_filter_options(page, spec['labels'])
-            all_text = None
-            specific = []
-            for x in opts:
-                if x in {'全部', '不限', '全部批次', '全部类型', '全部专业组'} and not all_text:
-                    all_text = x
-                else:
-                    specific.append(x)
-            dims.append({
-                'key': spec['key'],
-                'labels': spec['labels'],
-                'all_text': all_text,
-                'options': specific,
-            })
+        type_options = self.collect_dropdown_options_by_index(page, 2)
+        batch_options = self.collect_dropdown_options_by_index(page, 3)
+
+        self.expand_major_groups_if_needed(page)
+        major_groups = self.collect_major_groups(page)
+
+        dims = [
+            {
+                'key': 'type',
+                'mode': 'select',
+                'select_index': 2,
+                'options': [x for x in type_options if x not in {'全部'}],
+                'all_text': '全部',
+            },
+            {
+                'key': 'batch',
+                'mode': 'select',
+                'select_index': 3,
+                'options': [x for x in batch_options if x not in {'全部'}],
+                'all_text': '全部',
+            },
+            {
+                'key': 'major_group',
+                'mode': 'chips',
+                'options': [x for x in major_groups if x not in {'全部'}],
+                'all_text': '全部',
+            },
+        ]
         return dims
 
     def build_filter_combos(self, dims):
         axes = []
         for dim in dims:
-            values = [{'text': '__ALL__', 'labels': dim['labels'], 'key': dim['key'], 'all_text': dim['all_text']}]
-            for opt in dim['options']:
-                values.append({'text': opt, 'labels': dim['labels'], 'key': dim['key'], 'all_text': dim['all_text']})
+            values = [{
+                'key': dim['key'],
+                'mode': dim['mode'],
+                'text': '__ALL__',
+                'all_text': dim.get('all_text'),
+                'select_index': dim.get('select_index'),
+            }]
+            for opt in dim.get('options', []):
+                values.append({
+                    'key': dim['key'],
+                    'mode': dim['mode'],
+                    'text': opt,
+                    'all_text': dim.get('all_text'),
+                    'select_index': dim.get('select_index'),
+                })
             axes.append(values)
 
         if not axes:
@@ -674,139 +689,187 @@ class PlanCrawler(BaseCrawler):
         combos = []
         for prod in itertools.product(*axes):
             combo = {}
-            has_specific = False
             for item in prod:
                 combo[item['key']] = {
+                    'mode': item['mode'],
                     'text': item['text'],
-                    'labels': item['labels'],
-                    'all_text': item['all_text'],
+                    'all_text': item.get('all_text'),
+                    'select_index': item.get('select_index'),
                 }
-                if item['text'] != '__ALL__':
-                    has_specific = True
             combos.append(combo)
-
-        combos = [self.combo_to_plain_dict(c) for c in combos]
 
         if self.max_combos > 0:
             combos = combos[:self.max_combos]
-        if not combos:
-            combos = [{}]
         if combos and {} not in combos:
             combos.insert(0, {})
-        return combos
-
-    def combo_to_plain_dict(self, combo):
-        plain = {}
-        for k, v in (combo or {}).items():
-            plain[k] = {
-                'text': v.get('text'),
-                'labels': v.get('labels') or [],
-                'all_text': v.get('all_text'),
-            }
-        return plain
+        return combos or [{}]
 
     def combo_to_log_text(self, combo):
         if not combo:
             return '默认'
         parts = []
-        for k in ['batch', 'type', 'major_group', 'subject_requirements']:
-            item = combo.get(k)
-            if not item:
-                continue
+        for k in ['type', 'batch', 'major_group']:
+            item = combo.get(k) or {}
             val = item.get('text')
             if val and val != '__ALL__':
                 parts.append(f'{k}={val}')
         return ', '.join(parts) if parts else '默认'
 
     def apply_combo(self, page, combo):
-        if not combo:
-            return
+        current = self.get_current_filter_texts(page)
 
-        for key in ['batch', 'type', 'major_group', 'subject_requirements']:
-            item = combo.get(key)
-            if not item:
-                continue
-            text = item.get('text')
-            labels = item.get('labels') or []
-            all_text = item.get('all_text')
+        type_item = (combo or {}).get('type')
+        if type_item:
+            target = type_item.get('all_text') if type_item.get('text') == '__ALL__' else type_item.get('text')
+            if target and current.get('type') != target:
+                self.select_plan_filter_by_index(page, 2, target)
 
-            if text == '__ALL__':
-                if all_text:
-                    self.try_click_text(page, all_text, scope_labels=labels)
-                continue
+        current = self.get_current_filter_texts(page)
 
-            self.try_click_text(page, text, scope_labels=labels)
-            self._page_wait(page, 1000)
+        batch_item = (combo or {}).get('batch')
+        if batch_item:
+            target = batch_item.get('all_text') if batch_item.get('text') == '__ALL__' else batch_item.get('text')
+            if target and current.get('batch') != target:
+                self.select_plan_filter_by_index(page, 3, target)
 
+        group_item = (combo or {}).get('major_group')
+        if group_item:
+            target = group_item.get('all_text') if group_item.get('text') == '__ALL__' else group_item.get('text')
+            if target:
+                self.click_major_group(page, target)
+
+        self._page_wait(page, 1000)
         self.wait_table_ready(page)
 
     def table_snapshot(self, page):
-        try:
-            data = page.evaluate(
-                """
-                () => {
-                  const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
-                  const visible = el => {
-                    if (!el) return false;
-                    const rect = el.getBoundingClientRect();
-                    const st = window.getComputedStyle(el);
-                    return rect.width > 0 && rect.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
-                  };
+        data = page.evaluate(
+            """
+            () => {
+              const root = [...document.querySelectorAll('div.bgwhite')]
+                .find(b => (b.innerText || '').includes('招生计划'));
+              if (!root) return {headers: [], rows: []};
 
-                  const tables = [...document.querySelectorAll('table,[role="table"]')].filter(visible);
-                  let best = null;
-                  let bestRows = -1;
+              const table = root.querySelector('table.tb-normal');
+              if (!table) return {headers: [], rows: []};
 
-                  for (const table of tables) {
-                    const headers = [...table.querySelectorAll('thead th')].map(th => norm(th.innerText || th.textContent)).filter(Boolean);
-                    const rows = [...table.querySelectorAll('tbody tr')].map(tr =>
-                      [...tr.querySelectorAll('td,th')].map(td => norm(td.innerText || td.textContent))
-                    ).filter(r => r.some(Boolean));
-                    if (rows.length > bestRows) {
-                      best = {headers, rows};
-                      bestRows = rows.length;
-                    }
-                  }
+              const headers = [...table.querySelectorAll('thead td, thead th')]
+                .map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim());
 
-                  if (best && best.rows.length) {
-                    return best;
-                  }
+              const rows = [...table.querySelectorAll('tbody tr')].map(tr => {
+                const tds = [...tr.querySelectorAll('td')];
+                return tds.map((td, idx) => {
+                  const txt = (td.innerText || td.textContent || '').replace(/\s+/g, ' ').trim();
+                  if (idx !== 0) return txt;
 
-                  const rowLike = [...document.querySelectorAll('tbody tr,.ant-table-row,.el-table__row,[role="row"]')].filter(visible);
-                  if (rowLike.length) {
-                    const rows = rowLike.map(tr =>
-                      [...tr.querySelectorAll('td,th,[role="cell"],[role="gridcell"]')].map(td => norm(td.innerText || td.textContent))
-                    ).filter(r => r.some(Boolean));
-                    return {headers: [], rows};
-                  }
+                  const h3 = td.querySelector('h3');
+                  const pList = [...td.querySelectorAll('p')].map(x => (x.innerText || x.textContent || '').trim()).filter(Boolean);
+                  const xk = td.querySelector('.score-plan_xkyq__16ULz');
+                  return JSON.stringify({
+                    major: h3 ? (h3.innerText || h3.textContent || '').trim() : '',
+                    major_desc: pList.join('；'),
+                    subject_requirements: xk ? (xk.innerText || xk.textContent || '').trim() : '',
+                    raw: txt
+                  });
+                });
+              }).filter(r => r.some(Boolean));
 
-                  return {headers: [], rows: []};
-                }
-                """
-            )
-            headers = data.get('headers') or []
-            rows = data.get('rows') or []
-            return headers, rows
-        except Exception:
-            return [], []
+              return {headers, rows};
+            }
+            """
+        )
+        return data.get('headers') or [], data.get('rows') or []
+
+    def normalize_table_rows(self, school_id, year, province_id, province_name, headers, rows, source_filter):
+        result = []
+
+        for row in rows:
+            if len(row) < 3:
+                continue
+
+            major_cell_raw = row[0] if len(row) > 0 else ''
+            plan_number = self._clean_text(row[1] if len(row) > 1 else '')
+            fee_cell = self._clean_text(row[2] if len(row) > 2 else '')
+            rate_cell = self._clean_text(row[3] if len(row) > 3 else '')
+
+            major = ''
+            major_desc = ''
+            subject_requirements = source_filter.get('subject_requirements')
+
+            try:
+                major_obj = json.loads(major_cell_raw)
+                if isinstance(major_obj, dict):
+                    major = self._clean_text(major_obj.get('major'))
+                    major_desc = self._clean_text(major_obj.get('major_desc'))
+                    subject_requirements = self._clean_text(major_obj.get('subject_requirements')) or subject_requirements
+            except Exception:
+                major = self._clean_text(major_cell_raw)
+
+            years_value = None
+            tuition = None
+            fee_parts = [self._clean_text(x) for x in fee_cell.split(' ') if self._clean_text(x)]
+            if fee_parts:
+                if len(fee_parts) >= 1:
+                    years_value = fee_parts[0]
+                if len(fee_parts) >= 2:
+                    tuition = fee_parts[1]
+
+            note_parts = []
+            if major_desc:
+                note_parts.append(major_desc)
+            if rate_cell:
+                note_parts.append(rate_cell)
+            note = '；'.join(note_parts) if note_parts else None
+
+            if not major and not plan_number:
+                continue
+
+            result.append({
+                'school_id': str(school_id),
+                'year': str(year),
+                'province_id': str(province_id),
+                'province': province_name,
+                'plan_type': 'browser',
+                'batch': source_filter.get('batch'),
+                'type': source_filter.get('type'),
+                'major': major,
+                'major_code': None,
+                'major_group': source_filter.get('major_group'),
+                'major_group_code': None,
+                'major_group_info': None,
+                'level1_name': None,
+                'level2_name': None,
+                'level3_name': None,
+                'plan_number': plan_number,
+                'years': years_value,
+                'tuition': tuition,
+                'note': note,
+                'subject_requirements': subject_requirements,
+                'source': 'browser',
+                'source_filter': dict(source_filter or {}),
+                'raw_row': {
+                    'major_raw': major_cell_raw,
+                    'plan_number': plan_number,
+                    'fee_cell': fee_cell,
+                    'rate_cell': rate_cell,
+                },
+            })
+
+        return result
 
     def current_page_no(self, page):
         try:
             n = page.evaluate(
                 """
                 () => {
-                  const norm = s => (s || '').replace(/\\s+/g, '').trim();
-                  const visible = el => {
-                    if (!el) return false;
-                    const rect = el.getBoundingClientRect();
-                    const st = window.getComputedStyle(el);
-                    return rect.width > 0 && rect.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
-                  };
-                  const active = [...document.querySelectorAll('.active,.is-active,.ant-pagination-item-active,.el-pager li.active,[aria-current="page"]')].find(visible);
+                  const root = [...document.querySelectorAll('div.bgwhite')]
+                    .find(b => (b.innerText || '').includes('招生计划'));
+                  if (!root) return null;
+
+                  const active = root.querySelector('.ant-pagination-item-active a, .ant-pagination-item-active');
                   if (!active) return null;
-                  const t = norm(active.innerText || active.textContent);
-                  const m = t.match(/^\\d+$/);
-                  return m ? parseInt(m[0], 10) : null;
+
+                  const t = (active.innerText || active.textContent || '').trim();
+                  return /^\d+$/.test(t) ? parseInt(t, 10) : null;
                 }
                 """
             )
@@ -814,47 +877,33 @@ class PlanCrawler(BaseCrawler):
         except Exception:
             return None
 
-    def goto_page_number(self, page, target_page):
-        if target_page <= 1:
-            return True
-
-        for _ in range(target_page - 1):
-            ok = self.click_next_page(page)
-            if not ok:
-                return False
-        return True
+    def first_row_signature(self, page):
+        _, rows = self.table_snapshot(page)
+        if not rows:
+            return ''
+        return ' | '.join(rows[0][:4])
 
     def click_next_page(self, page):
         try:
             old_signature = self.first_row_signature(page)
+            old_page_no = self.current_page_no(page) or 1
             clicked = page.evaluate(
                 """
                 () => {
-                  const norm = s => (s || '').replace(/\\s+/g, '').trim();
-                  const visible = el => {
-                    if (!el) return false;
-                    const rect = el.getBoundingClientRect();
-                    const st = window.getComputedStyle(el);
-                    return rect.width > 0 && rect.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
-                  };
-                  const disabled = el => {
-                    const cls = String(el.className || '');
-                    return el.hasAttribute('disabled')
-                      || el.getAttribute('aria-disabled') === 'true'
-                      || /disabled|is-disabled|ant-pagination-disabled/.test(cls);
-                  };
-                  const candidates = [...document.querySelectorAll('button,a,li,span,div')].filter(visible);
+                  const root = [...document.querySelectorAll('div.bgwhite')]
+                    .find(b => (b.innerText || '').includes('招生计划'));
+                  if (!root) return false;
 
-                  const nextText = ['下一页', '下页', '›', '>', '下一页>'];
-                  let hit = candidates.find(el => nextText.includes(norm(el.innerText || el.textContent)) && !disabled(el));
-                  if (!hit) {
-                    hit = candidates.find(el =>
-                      !disabled(el)
-                      && (/next/i.test(String(el.className || '')) || el.getAttribute('aria-label') === 'Next page')
-                    );
-                  }
-                  if (!hit) return false;
-                  hit.click();
+                  const nextBtn = root.querySelector('.ant-pagination-next');
+                  if (!nextBtn) return false;
+
+                  const cls = String(nextBtn.className || '');
+                  const disabled = nextBtn.getAttribute('aria-disabled') === 'true'
+                    || /disabled/.test(cls);
+
+                  if (disabled) return false;
+
+                  nextBtn.click();
                   return true;
                 }
                 """
@@ -862,26 +911,26 @@ class PlanCrawler(BaseCrawler):
             if not clicked:
                 return False
 
-            self._page_wait(page, 1200)
-
-            for _ in range(6):
+            for _ in range(8):
+                self._page_wait(page, 500)
                 new_signature = self.first_row_signature(page)
                 new_page_no = self.current_page_no(page)
                 if new_signature and new_signature != old_signature:
                     return True
-                if new_page_no:
+                if new_page_no and new_page_no > old_page_no:
                     return True
-                self._page_wait(page, 400)
             return True
         except Exception:
             return False
 
-    def first_row_signature(self, page):
-        headers, rows = self.table_snapshot(page)
-        if not rows:
-            return ''
-        first = rows[0]
-        return ' | '.join(first[:6])
+    def goto_page_number(self, page, target_page):
+        if target_page <= 1:
+            return True
+        for _ in range(target_page - 1):
+            ok = self.click_next_page(page)
+            if not ok:
+                return False
+        return True
 
     def scrape_combo_pages(
         self,
@@ -1060,10 +1109,6 @@ class PlanCrawler(BaseCrawler):
             'current_page': 1,
             'added_records': combo_added_total,
         }
-
-    # ----------------------------
-    # main crawl
-    # ----------------------------
 
     def crawl_one_year(self, year, school_ids=None, province_ids=None):
         school_ids = [str(x) for x in (school_ids or self.load_default_school_ids())]

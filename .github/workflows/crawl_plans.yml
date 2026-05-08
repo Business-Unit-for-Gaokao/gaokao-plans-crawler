@@ -50,6 +50,7 @@ jobs:
     timeout-minutes: 300
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+      PYTHONUNBUFFERED: '1'
 
     steps:
       - name: 检出代码
@@ -68,6 +69,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: 安装 Playwright Chromium
+        run: |
+          python -m playwright install --with-deps chromium
 
       - name: 创建数据目录
         run: |
@@ -114,7 +119,11 @@ jobs:
 
           YEAR_CSV="$(IFS=,; echo "${YEAR_LIST[*]}")"
 
-          python scripts/plan_chain.py             --years "$YEAR_CSV"             --current-year "$CURRENT_YEAR"             --current-province-index "$CURRENT_PROVINCE_INDEX"             --github-output "$GITHUB_OUTPUT"
+          python scripts/plan_chain.py \
+            --years "$YEAR_CSV" \
+            --current-year "$CURRENT_YEAR" \
+            --current-province-index "$CURRENT_PROVINCE_INDEX" \
+            --github-output "$GITHUB_OUTPUT"
 
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           echo "years_csv=$YEAR_CSV" >> "$GITHUB_OUTPUT"
@@ -152,10 +161,24 @@ jobs:
           export PLAN_PROGRESS_DIR="data/plans_progress"
           export PLAN_DATA_DIR="data/plans"
           export PLAN_RUN_DEADLINE_SECONDS=17400
-          export PLAN_FLUSH_SCHOOLS=25
+          export PLAN_FLUSH_SCHOOLS=10
+          export PLAN_FLUSH_COMBOS=5
           export SCHOOL_DATA_FILE="data/schools.json"
 
-          python scripts/run_plans_once.py             --year "$PLAN_YEAR"             --province-id "$PLAN_PROVINCE_ID"             --province-index "$PLAN_PROVINCE_INDEX"             --mode "$PLAN_MODE"             --github-output "$GITHUB_OUTPUT"
+          export PLAN_USE_BROWSER=1
+          export PLAN_USE_STATIC_FALLBACK=1
+          export PLAN_HEADLESS=1
+          export PLAN_PAGE_TIMEOUT_MS=25000
+          export PLAN_WAIT_AFTER_NAV_MS=2000
+          export PLAN_WAIT_AFTER_CLICK_MS=1000
+          export PLAN_PAGE_SIZE_HINT=10
+
+          python scripts/run_plans_once.py \
+            --year "$PLAN_YEAR" \
+            --province-id "$PLAN_PROVINCE_ID" \
+            --province-index "$PLAN_PROVINCE_INDEX" \
+            --mode "$PLAN_MODE" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: 提交结果
         id: commit_changes
@@ -225,4 +248,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          bash scripts/dispatch_next_run.sh             .github/workflows/crawl_plans.yml             "${GITHUB_REF_NAME}"             "${{ steps.plan_context.outputs.mode }}"             "${{ steps.plan_context.outputs.years_csv }}"             "${{ steps.next_run.outputs.target_year }}"             "${{ steps.next_run.outputs.target_province_index }}"
+          bash scripts/dispatch_next_run.sh \
+            .github/workflows/crawl_plans.yml \
+            "${GITHUB_REF_NAME}" \
+            "${{ steps.plan_context.outputs.mode }}" \
+            "${{ steps.plan_context.outputs.years_csv }}" \
+            "${{ steps.next_run.outputs.target_year }}" \
+            "${{ steps.next_run.outputs.target_province_index }}"

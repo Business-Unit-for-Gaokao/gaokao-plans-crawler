@@ -30,3 +30,12 @@ This crawler targets 掌上高考 admission plan data.
 - `Origin: https://www.gaokao.cn`
 - `Referer: https://www.gaokao.cn/`
 <!-- crawl-sources:end -->
+
+## 历史 v13 页面爬虫
+
+`FutureTechnique/plans` 的 v13 页面抓取脚本和经验已合并到：
+
+- `crawlers/gaokao_cn_school_plans_v13/`
+- `docs/futuretechnique-plans-migration.md`
+
+该目录用于保留动态省份发现、dropdown 校验、多 worker、错误恢复等页面抓取经验；正式主实现仍建议优先演进 `crawlers/new_plans.py`。

@@ -1,0 +1,17 @@
+# Local browser login state / cookies
+storage_state.json
+*.storage_state.json
+
+# Runtime outputs and logs
+errors/
+plans/
+data/v13_plans/
+**/_meta/*.jsonl
+**/_meta/dedupe_summary.json
+**/_meta/deduped_errors.jsonl
+
+# Python / local env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
